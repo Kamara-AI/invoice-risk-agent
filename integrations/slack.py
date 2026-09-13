@@ -13,6 +13,9 @@ Interactive button payloads from reviewers are handled by the
 
 from __future__ import annotations
 
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError  # noqa: F401 — re-exported for callers
+
 from config import settings
 
 
@@ -25,7 +28,7 @@ class SlackClient:
 
     def __init__(self) -> None:
         """Initialise the Slack WebClient with the bot token from settings."""
-        pass
+        self.client = WebClient(token=settings.slack_bot_token)
 
     def send_alert(self, channel: str, text: str) -> None:
         """Post a plain-text alert to the specified Slack channel.
@@ -39,7 +42,7 @@ class SlackClient:
         Raises:
             slack_sdk.errors.SlackApiError: On API failures.
         """
-        pass
+        self.client.chat_postMessage(channel=channel, text=text)
 
     def send_review_request(
         self,
@@ -66,4 +69,67 @@ class SlackClient:
         Raises:
             slack_sdk.errors.SlackApiError: On API failures.
         """
-        pass
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "Invoice Review Required",
+                    "emoji": False,
+                },
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Invoice ID:*\n`{invoice_id}`",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Risk Score:*\n{risk_score}/100",
+                    },
+                ],
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*LLM Reasoning:*\n{reasoning}",
+                },
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Approve",
+                            "emoji": False,
+                        },
+                        "style": "primary",
+                        "action_id": f"approve_{invoice_id}",
+                        "value": invoice_id,
+                    },
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Reject",
+                            "emoji": False,
+                        },
+                        "style": "danger",
+                        "action_id": f"reject_{invoice_id}",
+                        "value": invoice_id,
+                    },
+                ],
+            },
+        ]
+
+        response = self.client.chat_postMessage(
+            channel=settings.slack_review_channel_id,
+            text=f"Invoice {invoice_id} requires review (risk score: {risk_score})",
+            blocks=blocks,
+        )
+        return response["ts"]

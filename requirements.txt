@@ -39,8 +39,12 @@ httpx>=0.27.0
 # Environment variable loading
 python-dotenv>=1.0.0
 
-# PDF parsing
-PyPDF2>=3.0.0
+# Streamlit — demo UI
+streamlit>=1.38.0
+pandas>=2.2.0
+
+# pypdf — PDF text extraction (parse_invoice node)
+pypdf>=4.3.0
 
 # Testing
 pytest>=8.3.0

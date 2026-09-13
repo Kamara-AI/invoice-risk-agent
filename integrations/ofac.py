@@ -18,13 +18,18 @@ from config import settings
 class OFACClient:
     """HTTP client for the OFAC sanctions screening API.
 
-    Uses httpx for async-compatible HTTP calls. All methods raise on
+    Uses httpx for synchronous HTTP calls. All methods raise on
     non-2xx responses — callers should catch httpx.HTTPStatusError.
     """
 
     def __init__(self) -> None:
         """Initialise the OFAC HTTP client with base URL and API key from settings."""
-        pass
+        self._base_url = settings.ofac_api_base_url
+        self._api_key = settings.ofac_api_key
+        self._client = httpx.Client(
+            base_url=self._base_url,
+            timeout=10.0,
+        )
 
     def check_vendor(
         self,
@@ -35,7 +40,7 @@ class OFACClient:
 
         Sends a synchronous POST to the OFAC API screening endpoint.
         The response includes a match score and a list of matched entities.
-        A match score ≥ 85 is treated as a positive hit by gate_ofac.
+        A match score >= 85 is treated as a positive hit by gate_ofac.
 
         Args:
             vendor_name: Legal name of the vendor as it appears on the invoice.
@@ -52,4 +57,42 @@ class OFACClient:
             httpx.HTTPStatusError: On non-2xx API responses.
             httpx.RequestError: On network-level failures.
         """
-        pass
+        # Build the case entry — optionally include country to narrow results.
+        case: dict = {"name": vendor_name}
+        if vendor_country:
+            case["address"] = {"country": vendor_country}
+
+        payload = {
+            "apiKey": self._api_key,
+            "minScore": 75,   # Capture soft-flag range (75-89) AND hard-block range (>=90)
+            "sources": ["SDN"],
+            "cases": [case],
+        }
+
+        response = self._client.post("/screen", json=payload)
+        response.raise_for_status()
+
+        raw = response.json()
+
+        # Normalise to the canonical return contract expected by gate_ofac.
+        # The OFAC v4 API returns: {"results": [{"matches": [...]}]}
+        results = raw.get("results", [])
+        all_matches: list[dict] = []
+        highest_score: float = 0.0
+
+        for result in results:
+            matches = result.get("matches", [])
+            all_matches.extend(matches)
+            for match in matches:
+                score = match.get("score", 0.0)
+                if score > highest_score:
+                    highest_score = score
+
+        matched = len(all_matches) > 0
+
+        return {
+            "match": matched,
+            "score": highest_score,
+            "matches": all_matches,
+            "raw": raw,  # Preserve full payload for gate_results.details
+        }

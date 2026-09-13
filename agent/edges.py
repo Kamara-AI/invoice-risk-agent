@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from schemas.agent_state import AgentState
 
+# Canonical gate order — must match the graph topology in graph.py.
+_GATE_ORDER = ["quality", "math", "duplicate", "ofac", "stripe"]
+
 
 def after_gate(state: AgentState) -> str:
     """Decide the next node after any gate has run.
@@ -24,7 +27,21 @@ def after_gate(state: AgentState) -> str:
         Name of the next node: "route_invoice" on failure, or the name of the
         next gate / "llm_score" if all gates have passed.
     """
-    pass
+    if state.get("gate_failed"):
+        return "route_invoice"
+
+    current = state.get("current_gate", "")
+    try:
+        idx = _GATE_ORDER.index(current)
+        if idx < len(_GATE_ORDER) - 1:
+            return f"gate_{_GATE_ORDER[idx + 1]}"
+        else:
+            # All gates passed — proceed to LLM scoring.
+            return "llm_score"
+    except ValueError:
+        # current_gate not in the list — route_invoice is the safe fallback;
+        # routing to llm_score would run the LLM on an empty/None parsed_invoice.
+        return "route_invoice"
 
 
 def after_scoring(state: AgentState) -> str:
@@ -40,4 +57,4 @@ def after_scoring(state: AgentState) -> str:
     Returns:
         Always "route_invoice".
     """
-    pass
+    return "route_invoice"

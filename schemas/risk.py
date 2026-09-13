@@ -26,7 +26,7 @@ class RiskScore(BaseModel):
         le=100,
         description=(
             "Composite risk score from 0 (lowest risk) to 100 (highest risk). "
-            "Scores ≥ 70 trigger human_review; ≥ 90 trigger block."
+            "Scores ≥ 50 trigger human_review; ≥ 90 trigger block."
         ),
     )
     flags: list[str] = Field(

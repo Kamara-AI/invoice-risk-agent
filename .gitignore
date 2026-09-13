@@ -46,6 +46,8 @@ dmypy.json
 
 # PDF invoice files — may contain PII
 *.pdf
+# Exception: synthetic eval fixtures contain no real data and are safe to commit
+!evals/fixtures/*.pdf
 
 # IDE
 .idea/

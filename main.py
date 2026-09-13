@@ -12,6 +12,7 @@ integrations/. Routes delegate to the agent graph immediately.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,20 @@ from api.routes.health import router as health_router
 from api.routes.invoice import router as invoice_router
 from api.routes.slack_webhook import router as slack_router
 from config import settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan — runs setup on startup, teardown on shutdown.
+
+    Injects LangSmith and OpenAI configuration into the environment so that
+    LangChain picks them up regardless of import order.
+    """
+    os.environ["LANGCHAIN_TRACING_V2"] = settings.langchain_tracing_v2
+    os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+    os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+    os.environ["OPENAI_API_KEY"] = settings.openai_api_key
+    yield
 
 
 def create_app() -> FastAPI:
@@ -35,6 +50,7 @@ def create_app() -> FastAPI:
             "through 5 fraud-detection gates with full LangSmith observability."
         ),
         version="1.0.0",
+        lifespan=lifespan,
         docs_url="/docs" if settings.app_env != "production" else None,
         redoc_url="/redoc" if settings.app_env != "production" else None,
     )
@@ -62,17 +78,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-
-
-@app.on_event("startup")
-async def configure_langsmith() -> None:
-    """Inject LangSmith configuration into the environment on startup.
-
-    LangChain reads LANGCHAIN_TRACING_V2 and LANGCHAIN_PROJECT from os.environ
-    at import time in some code paths, so we set them explicitly here as well
-    as relying on the .env file to ensure they are always present.
-    """
-    os.environ["LANGCHAIN_TRACING_V2"] = settings.langchain_tracing_v2
-    os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
-    os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
-    os.environ["OPENAI_API_KEY"] = settings.openai_api_key

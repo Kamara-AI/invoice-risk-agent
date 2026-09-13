@@ -30,13 +30,15 @@ def get_vendor_by_name(vendor_name: str) -> dict | None:
     Raises:
         Exception: On Supabase client errors.
     """
-    pass
+    response = supabase.table("vendor_ledger").select("*").ilike("name", vendor_name).execute()
+    data = response.data
+    return data[0] if data else None
 
 
 def upsert_vendor(vendor_data: dict) -> dict:
     """Insert or update a vendor record in vendor_ledger.
 
-    Uses Supabase upsert on (name, email) to ensure idempotency.
+    Uses Supabase upsert on (name) to ensure idempotency.
     Called by the route node after each invoice is processed to update
     last_seen, trust_level, and any new fingerprint or OFAC status.
 
@@ -50,7 +52,19 @@ def upsert_vendor(vendor_data: dict) -> dict:
     Raises:
         Exception: On Supabase client errors.
     """
-    pass
+    # Supabase upsert requires a UNIQUE constraint — use select+insert/update pattern instead.
+    existing = get_vendor_by_name(vendor_data["name"])
+    if existing:
+        vendor_id = existing["vendor_id"]
+        response = (
+            supabase.table("vendor_ledger")
+            .update(vendor_data)
+            .eq("vendor_id", vendor_id)
+            .execute()
+        )
+    else:
+        response = supabase.table("vendor_ledger").insert(vendor_data).execute()
+    return response.data[0]
 
 
 def create_invoice_record(invoice_data: dict) -> dict:
@@ -70,7 +84,8 @@ def create_invoice_record(invoice_data: dict) -> dict:
     Raises:
         Exception: On Supabase client errors.
     """
-    pass
+    response = supabase.table("invoice_history").insert(invoice_data).execute()
+    return response.data[0]
 
 
 def update_invoice_status(
@@ -93,7 +108,14 @@ def update_invoice_status(
     Raises:
         Exception: On Supabase client errors.
     """
-    pass
+    update_data = {"status": status, **(extra_fields or {})}
+    response = (
+        supabase.table("invoice_history")
+        .update(update_data)
+        .eq("invoice_id", invoice_id)
+        .execute()
+    )
+    return response.data[0]
 
 
 def write_audit_log(record: AuditRecord) -> AuditRecord:
@@ -112,4 +134,9 @@ def write_audit_log(record: AuditRecord) -> AuditRecord:
     Raises:
         Exception: On Supabase client errors.
     """
-    pass
+    response = (
+        supabase.table("audit_log")
+        .insert(record.model_dump(exclude={"log_id"}))
+        .execute()
+    )
+    return AuditRecord(**response.data[0])
