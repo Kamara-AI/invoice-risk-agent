@@ -54,7 +54,7 @@ streamlit run streamlit_app.py
 ```
 
 ### Try it instantly (no setup)
-Visit the live demo: **[DEMO_LINK]**
+Visit the live demo: **[https://www.loom.com/share/d57fc36634cc4a34bebc6fc4ab98450f](https://www.loom.com/share/d57fc36634cc4a34bebc6fc4ab98450f)**
 
 Download any fixture from the "Try a Demo Invoice" section on the page — upload it — see the pipeline run against live integrations in 15–30 seconds.
 
@@ -99,7 +99,7 @@ Full root cause analysis for every failure is documented in the [Calibration Sto
 
 ## 05 — Demo Video
 
-[Watch 2-min demo](DEMO_LINK) ← _to be added before submission_
+[Watch 2-min demo](https://www.loom.com/share/d57fc36634cc4a34bebc6fc4ab98450f)
 
 ---
 

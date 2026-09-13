@@ -13,6 +13,9 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -752,7 +755,7 @@ def _render_eval_results() -> None:
             return "color: #8e44ad; font-weight: bold"
         return "color: #27ae60"
 
-    styled = df.style.applymap(_style_category, subset=["Category"])
+    styled = df.style.map(_style_category, subset=["Category"])
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
     st.markdown("---")
