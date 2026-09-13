@@ -102,8 +102,16 @@ def _get_graph():
     across all user sessions and requests — avoids recompiling the StateGraph
     on every upload click.
     """
-    from agent.graph import build_graph
-    return build_graph()
+    try:
+        from agent.graph import build_graph
+        return build_graph()
+    except Exception as exc:
+        st.error(
+            f"**Pipeline failed to initialise** — secrets may not be configured.  \n"
+            f"Go to **Manage app → Settings → Secrets** and add your environment variables.  \n"
+            f"Error: `{exc}`"
+        )
+        st.stop()
 
 
 def run_pipeline_streaming(pdf_bytes: bytes, filename: str) -> tuple[dict, str]:
@@ -510,7 +518,10 @@ def _load_dashboard_data() -> dict:
     Returns:
         Dict with keys: total, by_routing, by_gate_fail, recent_rows.
     """
-    from db.client import supabase
+    try:
+        from db.client import supabase
+    except Exception as exc:
+        return {"error": f"Secrets not configured: {exc}", "total": 0, "by_routing": {}, "by_gate": {}, "recent": []}
 
     try:
         all_rows = (
