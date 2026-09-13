@@ -50,16 +50,16 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Gmail — invoice ingestion
     # ------------------------------------------------------------------
-    gmail_client_id: str = Field(..., description="OAuth2 client ID for Gmail API access.")
-    gmail_client_secret: str = Field(..., description="OAuth2 client secret for Gmail API access.")
-    gmail_refresh_token: str = Field(..., description="Long-lived refresh token for Gmail OAuth2 flow.")
-    gmail_user_email: str = Field(..., description="The mailbox address the agent monitors.")
+    gmail_client_id: str = Field(default="", description="OAuth2 client ID for Gmail API access.")
+    gmail_client_secret: str = Field(default="", description="OAuth2 client secret for Gmail API access.")
+    gmail_refresh_token: str = Field(default="", description="Long-lived refresh token for Gmail OAuth2 flow.")
+    gmail_user_email: str = Field(default="", description="The mailbox address the agent monitors.")
 
     # ------------------------------------------------------------------
     # Slack — human review and alerts
     # ------------------------------------------------------------------
     slack_bot_token: str = Field(..., description="Slack bot user OAuth token (xoxb-...).")
-    slack_signing_secret: str = Field(..., description="Used to verify Slack webhook payload signatures.")
+    slack_signing_secret: str = Field(default="", description="Used to verify Slack webhook payload signatures.")
     slack_review_channel_id: str = Field(..., description="Channel ID for human review request cards.")
     slack_alert_channel_id: str = Field(..., description="Channel ID for auto-block and system alerts.")
 
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # Stripe — payment fingerprinting
     # ------------------------------------------------------------------
     stripe_api_key: str = Field(..., description="Stripe secret key for Radar and PaymentMethod lookups.")
-    stripe_webhook_secret: str = Field(..., description="Stripe webhook signing secret for payload verification.")
+    stripe_webhook_secret: str = Field(default="", description="Stripe webhook signing secret for payload verification.")
 
     # ------------------------------------------------------------------
     # OFAC — sanctions screening
