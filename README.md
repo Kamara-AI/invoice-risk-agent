@@ -58,6 +58,12 @@ Visit the live demo: **[https://kagua-invoice-risk-agent-tvjvcw4izh8sh4myvv34do.
 
 Download any fixture from the "Try a Demo Invoice" section on the page — upload it — see the pipeline run against live integrations in 15–30 seconds.
 
+### Slack — Human-in-the-loop live
+
+When an invoice scores 50–89, Kagua posts a review card to Slack with the full LLM reasoning and one-click Approve / Reject buttons. Blocked invoices trigger an instant alert in the same channel.
+
+![Slack review card and block alert](docs/slack_live.png)
+
 ---
 
 ## 04 — Reliability Testing
