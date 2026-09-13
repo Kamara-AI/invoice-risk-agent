@@ -122,7 +122,12 @@ async def route_invoice(state: AgentState) -> AgentState:
             "email": vendor_email,
             "last_seen": now_eat(),
         }
-        if vendor_bank_account:
+        # Only store the bank fingerprint when the invoice was NOT blocked.
+        # A blocked invoice may carry a fraudulent (BEC-swapped) bank account —
+        # writing that back to vendor_ledger would corrupt the reference fingerprint
+        # and cause all subsequent legitimate invoices from this vendor to fail
+        # the Stripe BEC check. Only approved/reviewed invoices carry a trusted fingerprint.
+        if vendor_bank_account and action != "block":
             vendor_upsert_data["stripe_fingerprint"] = vendor_bank_account
         if action == "block":
             vendor_upsert_data["trust_level"] = "flagged"

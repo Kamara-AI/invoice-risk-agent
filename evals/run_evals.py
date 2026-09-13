@@ -83,10 +83,10 @@ def _cleanup_invoice_history() -> None:
 def _seed_trusted_vendors() -> None:
     """Force-reset known trusted vendors to their canonical state in vendor_ledger.
 
-    This must be an upsert (update if exists, insert if not) rather than
-    insert-if-not-exists. Eval cases like fraud_bec_001 call route_invoice which
-    writes the fraudulent bank fingerprint and 'flagged' trust_level back to the
-    vendor record — corrupting subsequent cases that rely on the vendor being trusted.
+    This must be a force-update, not insert-if-not-exists. The underlying bug in
+    route_invoice (writing fraudulent BEC fingerprints back to vendor_ledger on blocked
+    invoices) was fixed — route_invoice now only updates stripe_fingerprint when
+    action != 'block'. This reset remains here as defence-in-depth for the eval suite.
     """
     for v in _TRUSTED_VENDORS:
         existing = supabase.table("vendor_ledger").select("vendor_id").ilike("name", v["name"]).execute()

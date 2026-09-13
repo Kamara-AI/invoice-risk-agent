@@ -506,16 +506,28 @@ def main() -> None:
         if parsed_invoice:
             _render_parsed_invoice(parsed_invoice)
 
+        # ---- Human review next step -------------------------------------
+        if routing == "human_review":
+            slack_ts = result.get("slack_message_ts")
+            st.markdown("### 👤 Next Step — Human Review Required")
+            if slack_ts:
+                st.warning(
+                    "An interactive review card has been posted to **#invoice-review** in Slack.  \n"
+                    "The reviewer must click **Approve** or **Reject** in Slack to complete this invoice.  \n"
+                    f"Slack thread: `{slack_ts}`"
+                )
+            else:
+                st.warning(
+                    "This invoice requires human review.  \n"
+                    "Check **#invoice-review** in Slack — a review card should have been posted.  \n"
+                    "If no card arrived, verify your `SLACK_BOT_TOKEN` and channel configuration."
+                )
+
         # ---- Audit persistence confirmation ------------------------------
         audit_id = result.get("audit_record_id")
-        slack_ts = result.get("slack_message_ts")
-
-        if audit_id or slack_ts:
+        if audit_id:
             st.markdown("### 📌 Audit Trail")
-            if audit_id:
-                st.success(f"Persisted to Supabase audit log. Record ID: `{audit_id}`")
-            if slack_ts:
-                st.info(f"Slack review message posted. Thread timestamp: `{slack_ts}`")
+            st.success(f"Persisted to Supabase audit log. Record ID: `{audit_id}`")
 
 
 if __name__ == "__main__":
