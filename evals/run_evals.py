@@ -1,6 +1,6 @@
 """Eval runner for the invoice risk agent.
 
-Runs all 12 labeled cases through the compiled agent graph and computes
+Runs all 19 labeled cases through the compiled agent graph and computes
 correctness metrics. Intended to be executed before any production deployment
 and after any significant change to gate logic or LLM prompts.
 
@@ -218,7 +218,7 @@ async def run_single_case(case: dict) -> dict[str, Any]:
 
 
 async def run_all_evals() -> None:
-    """Run all 12 labeled cases and print a summary report.
+    """Run all 19 labeled cases and print a summary report.
 
     Metrics computed:
     - Routing accuracy: % of cases where actual_routing == expected_routing.

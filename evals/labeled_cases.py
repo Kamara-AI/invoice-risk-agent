@@ -1,9 +1,10 @@
 """Labeled evaluation cases for the invoice risk agent.
 
-12 cases across 3 categories:
+19 cases across 4 categories:
 - Clean (5): legitimate invoices that should auto-approve or pass cleanly.
 - Fraudulent (4): invoices with clear fraud signals targeting specific gates.
 - Edge (3): ambiguous cases that test threshold behaviour and human routing.
+- Stress (7): boundary and combination probes targeting LLM scoring edge cases.
 
 Each case is a dict with:
 - id: Unique case identifier matching the fixture PDF filename.

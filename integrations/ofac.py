@@ -40,7 +40,7 @@ class OFACClient:
 
         Sends a synchronous POST to the OFAC API screening endpoint.
         The response includes a match score and a list of matched entities.
-        A match score >= 85 is treated as a positive hit by gate_ofac.
+        Score >= 90 → hard block; score 75–89 → soft flag (+35 pts to LLM context).
 
         Args:
             vendor_name: Legal name of the vendor as it appears on the invoice.
