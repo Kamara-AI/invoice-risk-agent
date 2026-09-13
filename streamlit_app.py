@@ -401,133 +401,296 @@ def _render_demo_instructions() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard data loader
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=30)
+def _load_dashboard_data() -> dict:
+    """Query invoice_history and vendor_ledger for the dashboard tab.
+
+    Results are cached for 30 seconds so the dashboard refreshes automatically
+    while judges are interacting with the app.
+
+    Returns:
+        Dict with keys: total, by_routing, by_gate_fail, recent_rows.
+    """
+    from db.client import supabase
+
+    try:
+        all_rows = (
+            supabase.table("invoice_history")
+            .select("invoice_id, vendor_id, invoice_number, amount, currency, routing_decision, status, gate_results, submitted_at")
+            .order("submitted_at", desc=True)
+            .limit(200)
+            .execute()
+        ).data or []
+
+        # Vendor name lookup
+        vendor_ids = list({r["vendor_id"] for r in all_rows if r.get("vendor_id")})
+        vendor_map: dict[str, str] = {}
+        if vendor_ids:
+            vrows = (
+                supabase.table("vendor_ledger")
+                .select("vendor_id, name")
+                .in_("vendor_id", vendor_ids)
+                .execute()
+            ).data or []
+            vendor_map = {v["vendor_id"]: v["name"] for v in vrows}
+
+        # Routing breakdown
+        by_routing: dict[str, int] = {"auto_approve": 0, "human_review": 0, "block": 0}
+        for r in all_rows:
+            rd = r.get("routing_decision") or "unknown"
+            by_routing[rd] = by_routing.get(rd, 0) + 1
+
+        # Gate failure breakdown (which gate fired on blocked invoices)
+        import json
+        by_gate: dict[str, int] = {}
+        for r in all_rows:
+            if r.get("routing_decision") == "block":
+                gate_results = r.get("gate_results") or []
+                if isinstance(gate_results, str):
+                    try:
+                        gate_results = json.loads(gate_results)
+                    except Exception:
+                        gate_results = []
+                for g in gate_results:
+                    if not g.get("passed", True):
+                        name = g.get("gate_name", "unknown")
+                        by_gate[name] = by_gate.get(name, 0) + 1
+                        break  # only count first failing gate
+
+        # Recent rows for the table
+        recent = []
+        for r in all_rows[:20]:
+            recent.append({
+                "Vendor": vendor_map.get(r.get("vendor_id", ""), "Unknown"),
+                "Invoice #": r.get("invoice_number", "N/A"),
+                "Amount": f"{r.get('currency','USD')} {r.get('amount', 0):,.2f}",
+                "Decision": r.get("routing_decision", "N/A"),
+                "Status": r.get("status", "N/A"),
+                "Submitted": (r.get("submitted_at") or "")[:16].replace("T", " "),
+            })
+
+        return {
+            "total": len(all_rows),
+            "by_routing": by_routing,
+            "by_gate": by_gate,
+            "recent": recent,
+        }
+    except Exception as exc:
+        return {"error": str(exc), "total": 0, "by_routing": {}, "by_gate": {}, "recent": []}
+
+
+def _render_dashboard() -> None:
+    """Render the live invoice processing dashboard."""
+    st.markdown("### 📊 Live Processing Dashboard")
+    st.caption("Showing all invoices processed through the pipeline. Refreshes every 30 seconds.")
+
+    data = _load_dashboard_data()
+
+    if data.get("error"):
+        st.error(f"Could not load dashboard data: {data['error']}")
+        return
+
+    total = data["total"]
+    by_routing = data["by_routing"]
+    approved = by_routing.get("auto_approve", 0)
+    review = by_routing.get("human_review", 0)
+    blocked = by_routing.get("block", 0)
+
+    # ---- Headline metrics ------------------------------------------------
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Processed", total)
+    col2.metric("✅ Auto-Approved", approved,
+                delta=f"{approved/total*100:.0f}%" if total else "0%")
+    col3.metric("⚠️ Human Review", review,
+                delta=f"{review/total*100:.0f}%" if total else "0%")
+    col4.metric("🚫 Blocked", blocked,
+                delta=f"{blocked/total*100:.0f}% fraud rate" if total else "0%",
+                delta_color="inverse")
+
+    st.markdown("---")
+
+    col_left, col_right = st.columns([1, 1])
+
+    # ---- Routing breakdown chart -----------------------------------------
+    with col_left:
+        st.markdown("**Routing Breakdown**")
+        if total:
+            import pandas as pd
+            chart_data = pd.DataFrame({
+                "Decision": ["Auto-Approved", "Human Review", "Blocked"],
+                "Count": [approved, review, blocked],
+            })
+            st.bar_chart(chart_data.set_index("Decision"), color=["#2ecc71"])
+        else:
+            st.info("No data yet — process some invoices first.")
+
+    # ---- Gate failure breakdown ------------------------------------------
+    with col_right:
+        st.markdown("**Fraud Caught by Gate**")
+        by_gate = data["by_gate"]
+        if by_gate:
+            import pandas as pd
+            gate_df = pd.DataFrame(
+                [{"Gate": k.upper(), "Blocks": v} for k, v in sorted(by_gate.items(), key=lambda x: -x[1])]
+            )
+            st.dataframe(gate_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No fraud blocks recorded yet.")
+
+    st.markdown("---")
+
+    # ---- Recent invoices table -------------------------------------------
+    st.markdown("**Recent Invoices**")
+    recent = data["recent"]
+    if recent:
+        import pandas as pd
+
+        def _style_decision(val: str) -> str:
+            if val == "auto_approve":
+                return "color: #27ae60; font-weight: bold"
+            if val == "human_review":
+                return "color: #e67e22; font-weight: bold"
+            if val == "block":
+                return "color: #e74c3c; font-weight: bold"
+            return ""
+
+        df = pd.DataFrame(recent)
+        styled = df.style.applymap(_style_decision, subset=["Decision"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    else:
+        st.info("No invoices processed yet. Upload one above.")
+
+    if st.button("🔄 Refresh Dashboard"):
+        st.cache_data.clear()
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main app
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Entry point for the Streamlit application.
-
-    Renders the full UI: header, sidebar, upload widget, and results.
-    All pipeline calls are gated behind a button click to avoid accidental
-    re-runs on widget interaction.
-    """
+    """Entry point for the Streamlit application."""
     # ---- Integration status (sidebar) ------------------------------------
     integration_status = _check_integration_status()
     _render_sidebar(integration_status)
 
     # ---- Header ----------------------------------------------------------
-    st.title("🔍 Invoice Risk Intelligence Agent")
+    st.title("🔍 Kagua — Invoice Risk Intelligence Agent")
     st.markdown(
         "**Multi-gate fraud detection powered by LangGraph + GPT-4o**  \n"
-        "Upload an invoice PDF to run it through 5 validation gates and an LLM risk scorer."
+        "5 fraud-detection gates · LLM risk scoring · Human-in-the-loop review · Full audit trail"
     )
     st.markdown("---")
 
-    # ---- Demo fixture downloads ------------------------------------------
-    _render_demo_invoices()
+    # ---- Tabs ------------------------------------------------------------
+    tab_analyse, tab_dashboard = st.tabs(["🔬 Analyse Invoice", "📊 Dashboard"])
 
-    # ---- Pipeline overview -----------------------------------------------
-    _render_demo_instructions()
+    with tab_dashboard:
+        _render_dashboard()
 
-    # ---- Upload area -----------------------------------------------------
-    st.markdown("### 📤 Upload Invoice")
-    uploaded_file = st.file_uploader(
+    with tab_analyse:
+        # ---- Demo fixture downloads --------------------------------------
+        _render_demo_invoices()
+
+        # ---- Pipeline overview -------------------------------------------
+        _render_demo_instructions()
+
+        # ---- Upload area -------------------------------------------------
+        st.markdown("### 📤 Upload Invoice")
+        uploaded_file = st.file_uploader(
         "Select a PDF invoice to analyse",
         type=["pdf"],
         help="PDF invoices only. Maximum 10 MB.",
     )
 
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
-        analyse_clicked = st.button(
-            "🚀 Analyse Invoice",
-            type="primary",
-            disabled=uploaded_file is None,
-        )
-    with col_info:
-        if uploaded_file is None:
-            st.info("Upload a PDF above, then click **Analyse Invoice**.")
-        else:
-            st.success(f"File ready: **{uploaded_file.name}** ({uploaded_file.size / 1024:.1f} KB)")
-
-    # ---- Pipeline run ----------------------------------------------------
-    if analyse_clicked and uploaded_file is not None:
-        pdf_bytes = uploaded_file.read()
-
-        with st.spinner("Running pipeline... this may take 15–30 seconds."):
-            try:
-                result = run_pipeline(pdf_bytes, uploaded_file.name)
-            except Exception as exc:  # noqa: BLE001 — surface all errors to the UI
-                st.error(f"Pipeline failed to start: {exc}")
-                st.stop()
-
-        st.markdown("---")
-        st.markdown("## 📋 Analysis Results")
-
-        # Show invoice ID for traceability
-        invoice_id = result.get("invoice_id", "unknown")
-        st.caption(f"Run ID: `{invoice_id}` — {result.get('created_at', '')}")
-
-        # ---- Error state -------------------------------------------------
-        if result.get("error"):
-            st.error(f"**Pipeline error:** {result['error']}")
-            st.markdown(
-                "The pipeline encountered an unhandled error. "
-                "Check your environment variables and integration credentials."
+        col_btn, col_info = st.columns([1, 3])
+        with col_btn:
+            analyse_clicked = st.button(
+                "🚀 Analyse Invoice",
+                type="primary",
+                disabled=uploaded_file is None,
             )
-
-        # ---- Routing decision --------------------------------------------
-        routing = result.get("routing_decision")
-        if routing:
-            _render_routing_badge(routing)
-        else:
-            st.warning("No routing decision was produced. The pipeline may have exited early.")
-
-        st.markdown("---")
-
-        # ---- Risk score --------------------------------------------------
-        risk_score = result.get("risk_score")
-        if risk_score:
-            _render_risk_score(risk_score)
-            st.markdown("---")
-
-        # ---- Gate results ------------------------------------------------
-        gate_results = result.get("gate_results", [])
-        if gate_results:
-            _render_gate_results(gate_results)
-            st.markdown("---")
-
-        # ---- Gate failure detail -----------------------------------------
-        if result.get("gate_failure_reason"):
-            st.error(f"**Gate failure:** {result['gate_failure_reason']}")
-
-        # ---- Parsed invoice details --------------------------------------
-        parsed_invoice = result.get("parsed_invoice")
-        if parsed_invoice:
-            _render_parsed_invoice(parsed_invoice)
-
-        # ---- Human review next step -------------------------------------
-        if routing == "human_review":
-            slack_ts = result.get("slack_message_ts")
-            st.markdown("### 👤 Next Step — Human Review Required")
-            if slack_ts:
-                st.warning(
-                    "An interactive review card has been posted to **#invoice-review** in Slack.  \n"
-                    "The reviewer must click **Approve** or **Reject** in Slack to complete this invoice.  \n"
-                    f"Slack thread: `{slack_ts}`"
-                )
+        with col_info:
+            if uploaded_file is None:
+                st.info("Upload a PDF above, then click **Analyse Invoice**.")
             else:
-                st.warning(
-                    "This invoice requires human review.  \n"
-                    "Check **#invoice-review** in Slack — a review card should have been posted.  \n"
-                    "If no card arrived, verify your `SLACK_BOT_TOKEN` and channel configuration."
+                st.success(f"File ready: **{uploaded_file.name}** ({uploaded_file.size / 1024:.1f} KB)")
+
+        # ---- Pipeline run ------------------------------------------------
+        if analyse_clicked and uploaded_file is not None:
+            pdf_bytes = uploaded_file.read()
+
+            with st.spinner("Running pipeline... this may take 15–30 seconds."):
+                try:
+                    result = run_pipeline(pdf_bytes, uploaded_file.name)
+                except Exception as exc:
+                    st.error(f"Pipeline failed to start: {exc}")
+                    st.stop()
+
+            st.markdown("---")
+            st.markdown("## 📋 Analysis Results")
+
+            invoice_id = result.get("invoice_id", "unknown")
+            st.caption(f"Run ID: `{invoice_id}` — {result.get('created_at', '')}")
+
+            if result.get("error"):
+                st.error(f"**Pipeline error:** {result['error']}")
+                st.markdown(
+                    "The pipeline encountered an unhandled error. "
+                    "Check your environment variables and integration credentials."
                 )
 
-        # ---- Audit persistence confirmation ------------------------------
-        audit_id = result.get("audit_record_id")
-        if audit_id:
-            st.markdown("### 📌 Audit Trail")
-            st.success(f"Persisted to Supabase audit log. Record ID: `{audit_id}`")
+            routing = result.get("routing_decision")
+            if routing:
+                _render_routing_badge(routing)
+            else:
+                st.warning("No routing decision was produced. The pipeline may have exited early.")
+
+            st.markdown("---")
+
+            risk_score = result.get("risk_score")
+            if risk_score:
+                _render_risk_score(risk_score)
+                st.markdown("---")
+
+            gate_results = result.get("gate_results", [])
+            if gate_results:
+                _render_gate_results(gate_results)
+                st.markdown("---")
+
+            if result.get("gate_failure_reason"):
+                st.error(f"**Gate failure:** {result['gate_failure_reason']}")
+
+            parsed_invoice = result.get("parsed_invoice")
+            if parsed_invoice:
+                _render_parsed_invoice(parsed_invoice)
+
+            if routing == "human_review":
+                slack_ts = result.get("slack_message_ts")
+                st.markdown("### 👤 Next Step — Human Review Required")
+                if slack_ts:
+                    st.warning(
+                        "An interactive review card has been posted to **#invoice-review** in Slack.  \n"
+                        "The reviewer must click **Approve** or **Reject** in Slack to complete this invoice.  \n"
+                        f"Slack thread: `{slack_ts}`"
+                    )
+                else:
+                    st.warning(
+                        "This invoice requires human review.  \n"
+                        "Check **#invoice-review** in Slack — a review card should have been posted."
+                    )
+
+            audit_id = result.get("audit_record_id")
+            if audit_id:
+                st.markdown("### 📌 Audit Trail")
+                st.success(f"Persisted to Supabase audit log. Record ID: `{audit_id}`")
+
+            # Clear dashboard cache so new result appears immediately
+            st.cache_data.clear()
 
 
 if __name__ == "__main__":
