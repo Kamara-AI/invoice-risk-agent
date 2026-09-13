@@ -1,14 +1,105 @@
 # Kagua — Invoice Risk Intelligence Agent
 
+> **Lemma x Arga Labs Hackathon — September 13–14, 2026**
+
 A production-grade LangGraph pipeline that screens accounts payable invoices through 5 deterministic fraud-detection gates, scores residual risk with GPT-4o, and routes each invoice to auto-approve, human review, or block — with every decision traced end-to-end in LangSmith and every state transition written to an immutable audit log.
 
-**19/19 eval cases passing. 0% silent fraud rate. Live integrations: OFAC, Stripe, Supabase, Slack.**
+**19/19 eval cases · 0% silent fraud · 5 live integrations · 47 unit tests**
 
 ---
 
-## Demo
+## 01 — Project Overview
 
-[Watch 2-min demo](DEMO_LINK) ← _link to be added before submission_
+AP fraud costs organisations an estimated **$1.27 million per year on average**. Business Email Compromise — where an attacker intercepts an invoice and swaps payment details — caused **$2.7 billion in US losses in 2022** (FBI IC3). Existing AP tools route invoices faster; they do not make them safer.
+
+Kagua intercepts every invoice before payment and answers three questions automatically:
+
+1. **Is this invoice structurally valid?** — required fields, correct arithmetic, not a duplicate
+2. **Is this vendor sanctioned or swapping bank accounts?** — OFAC screening + BEC detection
+3. **What is the residual risk?** — GPT-4o composite score across soft signals (vendor history, invoice age, amount vs. PO reference)
+
+Low-risk invoices auto-approve in under 10 seconds with no human touch. Medium-risk invoices send an interactive Slack card and pause the pipeline until a reviewer clicks Approve or Reject. High-risk and sanctioned invoices are blocked immediately with a full alert.
+
+**A single blocked BEC attack ($137k average) pays for the entire integration.**
+
+---
+
+## 02 — External Apps Connected
+
+| # | Integration | Purpose |
+|---|-------------|---------|
+| 1 | **OpenAI GPT-4o / GPT-4o-mini** | PDF field extraction (mini) + composite risk scoring (4o) with structured output |
+| 2 | **OFAC API** (ofac-api.com) | Real-time sanctions screening against the SDN list — two-tier: ≥90 hard block, 75–89 soft flag |
+| 3 | **Stripe** | Bank account fingerprint comparison for BEC detection; Radar score as fraud signal |
+| 4 | **Supabase** (PostgreSQL) | Vendor ledger, invoice history, and append-only audit log — every decision persisted |
+| 5 | **Slack** | Interactive Block Kit review cards for human-in-the-loop approvals; immediate fraud alerts |
+| + | **LangSmith** | Automatic full-pipeline tracing via LangGraph integration — every node, every LLM call |
+
+---
+
+## 03 — Setup Instructions
+
+### Prerequisites
+- Python 3.11+, Supabase free-tier project, OpenAI API key
+- Slack app with `chat:write` scope, OFAC API key, Stripe test account, LangSmith account
+
+```bash
+git clone https://github.com/Kamara-AI/invoice-risk-agent.git
+cd invoice-risk-agent
+python -m venv .venv && source .venv/Scripts/activate
+pip install -r requirements.txt
+cp .env.example .env   # fill in all keys
+# Apply migrations/001–003 in Supabase SQL editor
+streamlit run streamlit_app.py
+```
+
+### Try it instantly (no setup)
+Visit the live demo: **[DEMO_LINK]**
+
+Download any fixture from the "Try a Demo Invoice" section on the page — upload it — see the pipeline run against live integrations in 15–30 seconds.
+
+---
+
+## 04 — Reliability Testing
+
+### Eval suite: 19 labeled cases, live pipeline
+
+Every case runs through **real API calls** — no mocks — and is measured against ground truth labels.
+
+| Category | Count | Tests |
+|----------|-------|-------|
+| Clean | 5 | Trusted repeat vendor, new vendor with PO, high-value trusted, international (Kenya), no PO |
+| Fraudulent | 4 | One per gate: OFAC SDN hit, math inflation, duplicate, BEC bank swap |
+| Edge | 3 | Stale + high-value new vendor, high Radar score, trusted vendor late submission |
+| **Stress** | **7** | Future date, stacking soft signals, new vendor with PO, $180k trusted vendor, $0 line item, round numbers, trusted no-PO |
+
+**Final results:**
+
+| Metric | Score |
+|--------|-------|
+| Overall pass rate | **100% (19/19)** |
+| Routing accuracy | **100%** |
+| Gate detection rate | **100%** |
+| Silent fraud rate | **0%** |
+
+```bash
+python -m evals.run_evals   # reproduces these results end-to-end
+pytest tests/ -v            # 47 unit tests, 0.47s
+```
+
+### Two-phase calibration story
+
+**Phase 1 (12 cases, 50% → 100%):** Found and fixed OFAC false positives on clean vendor names, eval scoring bug for gate-blocked cases, non-deterministic OFAC partial matches, vendor trust-level seeding on fresh DB, and LLM scoring band misalignment.
+
+**Phase 2 (7 stress cases added, 84% → 100%):** Found duplicate gate false-positives on eval re-runs (eval infrastructure bug — not the agent), vendor state contamination between cases (fraud case wrote BEC fingerprint back to vendor_ledger, poisoning later cases), and LLM non-determinism on borderline $25k invoice.
+
+Full root cause analysis for every failure is documented in the [Calibration Story](#how-we-got-there--the-calibration-story) section below.
+
+---
+
+## 05 — Demo Video
+
+[Watch 2-min demo](DEMO_LINK) ← _to be added before submission_
 
 ---
 
