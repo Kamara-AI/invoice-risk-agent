@@ -63,3 +63,27 @@ class ParsedInvoice(BaseModel):
         default=None,
         description="PO number cross-referencing the buyer's procurement system, if present.",
     )
+
+
+class InvoiceExtraction(BaseModel):
+    """LLM output of the parse_invoice node: classify first, then extract.
+
+    Why a wrapper instead of extracting ParsedInvoice directly: asked to fill a
+    ParsedInvoice from a delivery note or a newsletter PDF, the LLM tends to
+    invent plausible fields, and the fake invoice then fails a gate and is
+    blocked as fraud. Asking "is this an invoice?" first lets Kagua answer
+    422 not_an_invoice (D12) instead of a misleading block.
+    """
+
+    is_invoice: bool = Field(
+        ...,
+        description="True only if the document is a request for payment (invoice or bill).",
+    )
+    not_invoice_reason: str | None = Field(
+        default=None,
+        description="Short reason when is_invoice is false, e.g. 'delivery note', 'marketing flyer'.",
+    )
+    invoice: ParsedInvoice | None = Field(
+        default=None,
+        description="The extracted invoice. Required when is_invoice is true; null otherwise.",
+    )

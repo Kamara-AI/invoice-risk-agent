@@ -37,6 +37,31 @@ class AgentState(TypedDict):
     labels ('processed', 'flagged') back to the source message."""
 
     # ------------------------------------------------------------------
+    # UiPath contract v1 inputs (optional — absent for Streamlit/evals runs)
+    # ------------------------------------------------------------------
+    idempotency_key: str | None
+    """Per-PDF key from the UiPath Dispatcher. Carried for traceability only;
+    idempotency itself is enforced by the HTTP layer before the graph runs."""
+
+    source_message_id: str | None
+    """Message-ID header of the source email (inbox-agnostic replacement for
+    gmail_message_id on the UiPath path)."""
+
+    email_body: str | None
+    """Cleaned email body used as LLM context (D12). UNTRUSTED input: never
+    logged, never persisted, only passed to the LLM inside delimiters."""
+
+    notify_slack: bool | None
+    """False on the UiPath path: route_invoice makes no Slack calls (review is
+    in Action Center, alerts by email). Absent/None/True = Slack on (Streamlit)."""
+
+    error_code: str | None
+    """Machine-readable classification of `error`, set alongside it by nodes
+    that can tell a permanent input problem from a transient failure:
+    'unreadable_pdf' | 'not_an_invoice' | 'extraction_failed'. None means a
+    transient/unknown error (the HTTP layer answers 500, the bot retries)."""
+
+    # ------------------------------------------------------------------
     # Parsed invoice
     # ------------------------------------------------------------------
     parsed_invoice: dict | None

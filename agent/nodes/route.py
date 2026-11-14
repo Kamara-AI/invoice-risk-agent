@@ -10,6 +10,8 @@ This node is the terminal action node. It:
      stores slack_message_ts in state and invoice_history.
    - block: posts a Slack alert to SLACK_ALERT_CHANNEL_ID, writes to
      invoice_history (status='blocked'), writes audit log.
+   When state.notify_slack is False (UiPath bot path) no Slack call is made:
+   review happens in UiPath Action Center and alerts go by email.
 
 Business-rule thresholds (override LLM recommendation upward only):
 - gate_failed=True → always block (regardless of LLM score)
@@ -159,7 +161,13 @@ async def route_invoice(state: AgentState) -> AgentState:
         logger.error("route_invoice: invoice_history insert failed: %s", exc)
 
     # --- Dispatch ---
-    slack = SlackClient()
+    # Slack is the review/alert channel for the Streamlit demo only. On the
+    # UiPath path (notify_slack=False) review happens in Action Center and
+    # alerts go by email (D6), so posting to Slack would create a second,
+    # unsynchronised place to approve the same invoice. Absent key = legacy
+    # behaviour (Slack on), so Streamlit and the evals are unchanged.
+    notify_slack = state.get("notify_slack", True) is not False
+    slack = SlackClient() if notify_slack else None
 
     if action == "auto_approve":
         try:
@@ -174,6 +182,26 @@ async def route_invoice(state: AgentState) -> AgentState:
                     event_type="route.auto_approve",
                     actor="system",
                     details={"reason": reason, "risk_score": (risk_score_dict or {}).get("score", 0)},
+                    created_at=now_eat(),
+                )
+            )
+        except Exception as exc:
+            logger.error("route_invoice: audit log write failed: %s", exc)
+
+    elif action == "human_review" and slack is None:
+        # UiPath path: the row stays status='processing' (awaiting review)
+        # until POST /invoices/{id}/review-decision records the human decision.
+        try:
+            write_audit_log(
+                AuditRecord(
+                    invoice_id=invoice_id,
+                    event_type="route.human_review",
+                    actor="system",
+                    details={
+                        "reason": reason,
+                        "risk_score": (risk_score_dict or {}).get("score", 0),
+                        "review_channel": "uipath_action_center",
+                    },
                     created_at=now_eat(),
                 )
             )
@@ -234,10 +262,11 @@ async def route_invoice(state: AgentState) -> AgentState:
             f"Reason: {reason}\n"
             f"Gate failure: {state.get('gate_failure_reason', 'N/A')}"
         )
-        try:
-            slack.send_alert(settings.slack_alert_channel_id, alert_text)
-        except Exception as exc:
-            logger.error("route_invoice: Slack alert failed: %s", exc)
+        if slack is not None:
+            try:
+                slack.send_alert(settings.slack_alert_channel_id, alert_text)
+            except Exception as exc:
+                logger.error("route_invoice: Slack alert failed: %s", exc)
 
         try:
             update_invoice_status(invoice_id, "blocked", {"resolved_by": "system", "resolved_at": now_eat()})

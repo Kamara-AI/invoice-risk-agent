@@ -17,8 +17,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.errors import register_error_handlers
 from api.routes.health import router as health_router
 from api.routes.invoice import router as invoice_router
+from api.routes.review_decision import router as review_decision_router
 from api.routes.slack_webhook import router as slack_router
 from config import settings
 
@@ -72,6 +74,10 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     app.include_router(health_router, tags=["Health"])
     app.include_router(invoice_router, prefix="/invoices", tags=["Invoices"])
+    app.include_router(review_decision_router, prefix="/invoices", tags=["Invoices"])
+
+    # Flat {"error_code", "message"} bodies for every contract error (UiPath bot).
+    register_error_handlers(app)
     app.include_router(slack_router, prefix="/slack", tags=["Slack"])
 
     return app
