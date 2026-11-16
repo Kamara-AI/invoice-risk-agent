@@ -46,6 +46,13 @@ class Settings(BaseSettings):
         default="invoice-risk-agent",
         description="LangSmith project name. Traces are grouped under this label.",
     )
+    # LangSmith keys are region-scoped: a key created in the EU workspace gets
+    # 403 Forbidden from the US endpoint (the SDK default). Found 2026-11-16 —
+    # no trace had ever been ingested because of this. Set per account region.
+    langchain_endpoint: str = Field(
+        default="https://api.smith.langchain.com",
+        description="LangSmith API base URL; EU accounts use https://eu.api.smith.langchain.com.",
+    )
 
     # ------------------------------------------------------------------
     # Gmail — invoice ingestion
