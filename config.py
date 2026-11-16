@@ -72,7 +72,14 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # OFAC — sanctions screening
     # ------------------------------------------------------------------
-    ofac_api_key: str = Field(..., description="API key for the OFAC sanctions screening service.")
+    # Off by default since 2026-11-16: the ofac-api.com trial ended and a dead key
+    # made the gate pass silently. While off, every response carries the flag
+    # sanctions_not_screened. Turn on only with a working provider.
+    ofac_enabled: bool = Field(
+        default=False,
+        description="Run OFAC screening. False = gate passes and flags 'sanctions_not_screened'.",
+    )
+    ofac_api_key: str = Field(default="", description="API key for the OFAC sanctions screening service.")
     ofac_api_base_url: str = Field(
         default="https://api.ofac-api.com/v4",
         description="Base URL for the OFAC API. Override for sandbox environments.",

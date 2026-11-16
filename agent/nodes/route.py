@@ -18,6 +18,7 @@ Business-rule thresholds (override LLM recommendation upward only):
 - risk_score >= 90  → always block
 - risk_score >= 50  → at minimum human_review
 - risk_score < 50   → auto_approve (if LLM also recommends it)
+- a force-review policy flag (agent/policy_flags.py) → at minimum human_review
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
+from agent.policy_flags import requires_review
 from config import settings
 from db.queries import create_invoice_record, update_invoice_status, upsert_vendor, write_audit_log
 from db.queries import get_vendor_by_name
@@ -43,6 +45,23 @@ _ACTION_RANK: dict[str, int] = {
 
 
 def _resolve_action(
+    gate_failed: bool,
+    risk_score_dict: dict | None,
+    llm_recommendation: str | None,
+    policy_flags: list[str] | None = None,
+) -> tuple[Literal["auto_approve", "human_review", "block"], str]:
+    """Apply business rules, then policy flags, and return (action, reason).
+
+    Policy flags can only upgrade auto_approve to human_review; a block stays a block.
+    """
+    action, reason = _threshold_action(gate_failed, risk_score_dict, llm_recommendation)
+    forcing = requires_review(policy_flags)
+    if action == "auto_approve" and forcing:
+        return "human_review", f"{reason}; upgraded to human_review by policy flag(s): {', '.join(forcing)}"
+    return action, reason
+
+
+def _threshold_action(
     gate_failed: bool,
     risk_score_dict: dict | None,
     llm_recommendation: str | None,
@@ -103,7 +122,9 @@ async def route_invoice(state: AgentState) -> AgentState:
     parsed = state.get("parsed_invoice") or {}
 
     llm_recommendation = (risk_score_dict or {}).get("recommendation")
-    action, reason = _resolve_action(gate_failed, risk_score_dict, llm_recommendation)
+    action, reason = _resolve_action(
+        gate_failed, risk_score_dict, llm_recommendation, state.get("policy_flags")
+    )
 
     state["routing_decision"] = action
 

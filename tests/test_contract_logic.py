@@ -118,6 +118,12 @@ def test_mapping_flattens_llm_score() -> None:
     }
 
 
+def test_mapping_appends_policy_flags_once_in_order() -> None:
+    state = _scored_state(policy_flags=["sender_domain_mismatch", "no_po", "sanctions_not_screened"])
+    response = build_process_invoice_response(state)
+    assert response.risk_flags == ["new_vendor", "no_po", "sender_domain_mismatch", "sanctions_not_screened"]
+
+
 def test_mapping_gate_failure_scores_100_with_gate_flags() -> None:
     state = _scored_state(
         routing_decision="block",

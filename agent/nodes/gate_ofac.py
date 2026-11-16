@@ -14,12 +14,23 @@ a Slack alert to SLACK_ALERT_CHANNEL_ID (not the review channel).
 On pass: appends a GateResult(passed=True) to gate_results, continues.
 On fail: appends a GateResult(passed=False), sets gate_failed=True and
          gate_failure_reason.
+
+Switch and failure policy (Brian, 2026-11-16):
+- settings.ofac_enabled = False (the ofac-api.com trial ended): the gate passes
+  WITHOUT calling the API and adds policy flag sanctions_not_screened, so every
+  response says plainly that no sanctions screening happened. It does not force
+  review — otherwise every invoice would land in review while the switch is off.
+- Enabled but the API call fails: previously the gate passed silently (an
+  invoice could be auto-approved unscreened). Now it adds
+  sanctions_screening_failed, which forces human_review (decision #8).
 """
 
 from __future__ import annotations
 
 import logging
 
+from agent.policy_flags import SANCTIONS_NOT_SCREENED, SANCTIONS_SCREENING_FAILED, add_policy_flag
+from config import settings
 from integrations.ofac import OFACClient
 from schemas.agent_state import AgentState
 from schemas.gates import GateResult
@@ -42,6 +53,21 @@ async def gate_ofac(state: AgentState) -> AgentState:
     gate_results: list[dict] = list(state.get("gate_results") or [])
 
     vendor_name = parsed.get("vendor_name", "")
+
+    if not settings.ofac_enabled:
+        add_policy_flag(state, SANCTIONS_NOT_SCREENED)
+        gate_results.append(
+            GateResult(
+                gate_name="ofac",
+                passed=True,
+                reason="OFAC screening disabled (settings.ofac_enabled=false) — sanctions NOT screened",
+                details={"tier": "disabled"},
+                checked_at=now_eat(),
+            ).model_dump()
+        )
+        state["gate_results"] = gate_results
+        state["gate_failed"] = False
+        return state
 
     try:
         client = OFACClient()
@@ -106,14 +132,16 @@ async def gate_ofac(state: AgentState) -> AgentState:
         state["gate_failed"] = False
 
     except Exception as exc:
-        # OFAC API failure is NOT a sanctions hit. Log the warning and pass the gate
-        # so the invoice is not erroneously blocked by an infrastructure failure.
+        # OFAC API failure is NOT a sanctions hit, so the gate does not block.
+        # But approving unscreened would be a silent failure: the policy flag
+        # forces human_review in route_invoice (decision #8).
         logger.warning("OFAC API call failed for vendor '%s': %s", vendor_name, exc)
+        add_policy_flag(state, SANCTIONS_SCREENING_FAILED)
         gate_results.append(
             GateResult(
                 gate_name="ofac",
                 passed=True,
-                reason=f"OFAC API unavailable — screening skipped (not a sanctions hit): {exc}",
+                reason=f"OFAC API unavailable — screening failed, human review required: {exc}",
                 details={"api_error": str(exc)},
                 checked_at=now_eat(),
             ).model_dump()

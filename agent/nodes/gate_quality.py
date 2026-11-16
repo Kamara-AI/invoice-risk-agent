@@ -2,10 +2,13 @@
 
 Checks:
 1. All required ParsedInvoice fields are present and non-empty.
-2. The sender email from the Gmail envelope matches the vendor_email on the invoice
-   (BEC invoices often arrive from lookalike domains).
-3. invoice_date is not in the future; due_date is after invoice_date.
-4. currency is a recognised ISO 4217 code.
+2. invoice_date is not in the future; due_date is after invoice_date.
+3. currency is a recognised ISO 4217 code.
+4. Sender vs vendor email (only when state carries sender_email — the UiPath
+   path; Streamlit/evals runs have no envelope sender). Tiered, see
+   agent/sender_check.py: lookalike domain → FAIL (block, BEC);
+   other mismatch → pass + policy flag sender_domain_mismatch (forces review).
+   Runs last so a malformed invoice reports its real problem first.
 
 On pass: appends a GateResult(passed=True) to gate_results, continues.
 On fail: appends a GateResult(passed=False), sets gate_failed=True and
@@ -16,6 +19,8 @@ from __future__ import annotations
 
 from datetime import date
 
+from agent.policy_flags import SENDER_DOMAIN_MISMATCH, add_policy_flag
+from agent.sender_check import classify_sender
 from schemas.agent_state import AgentState
 from schemas.gates import GateResult
 from utils import now_eat
@@ -110,12 +115,35 @@ async def gate_quality(state: AgentState) -> AgentState:
     if currency not in _KNOWN_CURRENCIES:
         return _fail(f"Unrecognised currency code: '{currency}'")
 
+    # 5. Sender vs vendor email (UiPath path only).
+    reason = "All required fields present and valid"
+    sender_email = state.get("sender_email")
+    if sender_email:
+        vendor_email = str(parsed.get("vendor_email"))
+        verdict = classify_sender(sender_email, vendor_email)
+        sender_domain = sender_email.rpartition("@")[2].lower()
+        vendor_domain = vendor_email.rpartition("@")[2].lower()
+        # Domains only in reasons: they are logged and persisted, full addresses are not.
+        if verdict == "lookalike":
+            return _fail(
+                f"Sender domain '{sender_domain}' is a lookalike of the vendor's domain "
+                f"'{vendor_domain}' — possible business email compromise"
+            )
+        if verdict == "mismatch":
+            add_policy_flag(state, SENDER_DOMAIN_MISMATCH)
+            reason += (
+                f"; sender domain '{sender_domain}' differs from vendor domain "
+                f"'{vendor_domain}' — human review required"
+            )
+        else:
+            reason += "; sender matches vendor email"
+
     # All checks passed.
     gate_results.append(
         GateResult(
             gate_name="quality",
             passed=True,
-            reason="All required fields present and valid",
+            reason=reason,
             checked_at=now_eat(),
         ).model_dump()
     )

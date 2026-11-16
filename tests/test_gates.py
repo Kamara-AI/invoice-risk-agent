@@ -40,6 +40,9 @@ sys.modules.setdefault("db.client", _mock_db_client)
 # Mock db.queries module
 _mock_db_queries = ModuleType("db.queries")
 _mock_db_queries.get_vendor_by_name = MagicMock()  # type: ignore[attr-defined]
+# route_invoice (imported for its pure _resolve_action) needs these names to exist.
+for _name in ("create_invoice_record", "update_invoice_status", "upsert_vendor", "write_audit_log"):
+    setattr(_mock_db_queries, _name, MagicMock())
 sys.modules.setdefault("db.queries", _mock_db_queries)
 
 # Mock integrations modules
@@ -56,12 +59,25 @@ _mock_stripe_client_cls = MagicMock()
 _mock_stripe_module.StripeClient = _mock_stripe_client_cls  # type: ignore[attr-defined]
 sys.modules.setdefault("integrations.stripe_client", _mock_stripe_module)
 
+_mock_slack_module = ModuleType("integrations.slack")
+_mock_slack_module.SlackClient = MagicMock()  # type: ignore[attr-defined]
+sys.modules.setdefault("integrations.slack", _mock_slack_module)
+
 # Now safe to import gate modules
+import agent.nodes.gate_ofac as gate_ofac_module
 from agent.nodes.gate_duplicate import gate_duplicate
 from agent.nodes.gate_math import gate_math
 from agent.nodes.gate_ofac import gate_ofac
 from agent.nodes.gate_quality import gate_quality
 from agent.nodes.gate_stripe import gate_stripe
+from agent.nodes.route import _resolve_action
+from agent.policy_flags import SANCTIONS_NOT_SCREENED, SANCTIONS_SCREENING_FAILED, SENDER_DOMAIN_MISMATCH
+
+
+@pytest.fixture(autouse=True)
+def _ofac_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OFAC tests exercise the screening path; .env may have it switched off."""
+    monkeypatch.setattr(gate_ofac_module.settings, "ofac_enabled", True, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +233,84 @@ async def test_gate_quality_fails_unrecognised_currency() -> None:
     gate = result["gate_results"][0]
     assert gate["passed"] is False
     assert "XYZ" in gate["reason"]
+
+
+# --- gate_quality: sender vs vendor email (tiered, agent/sender_check.py) ---
+# The fixture invoice's vendor_email is billing@acme.com.
+
+@pytest.mark.asyncio
+async def test_gate_quality_sender_same_domain_passes_without_flag() -> None:
+    state = _base_state(parsed_invoice=_valid_parsed_invoice(), sender_email="accounts@acme.com")
+    result = await gate_quality(state)
+    assert result["gate_failed"] is False
+    assert not result.get("policy_flags")
+    assert "sender matches" in result["gate_results"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_gate_quality_sender_lookalike_blocks() -> None:
+    state = _base_state(parsed_invoice=_valid_parsed_invoice(vendor_email="billing@apexoffice.com"),
+                        sender_email="billing@apex0ffice.com")
+    result = await gate_quality(state)
+    assert result["gate_failed"] is True
+    gate = result["gate_results"][0]
+    assert gate["passed"] is False and "lookalike" in gate["reason"]
+    assert "billing@" not in gate["reason"], "reasons carry domains only, never full addresses"
+
+
+@pytest.mark.asyncio
+async def test_gate_quality_sender_other_domain_passes_with_review_flag() -> None:
+    state = _base_state(parsed_invoice=_valid_parsed_invoice(), sender_email="acme.accounts@gmail.com")
+    result = await gate_quality(state)
+    assert result["gate_failed"] is False
+    assert result["policy_flags"] == [SENDER_DOMAIN_MISMATCH]
+    assert "human review required" in result["gate_results"][0]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_gate_quality_without_sender_skips_the_check() -> None:
+    """Streamlit/evals runs carry no envelope sender."""
+    result = await gate_quality(_base_state(parsed_invoice=_valid_parsed_invoice()))
+    assert result["gate_failed"] is False
+    assert not result.get("policy_flags")
+
+
+@pytest.mark.asyncio
+async def test_gate_quality_reports_bad_fields_before_sender() -> None:
+    state = _base_state(parsed_invoice=_valid_parsed_invoice(currency="XYZ"),
+                        sender_email="billing@apex0ffice.com")
+    result = await gate_quality(state)
+    assert "XYZ" in result["gate_results"][0]["reason"]
+
+
+# ---------------------------------------------------------------------------
+# route: policy flags can only upgrade auto_approve → human_review
+# ---------------------------------------------------------------------------
+
+def test_route_policy_flag_upgrades_auto_approve_to_review() -> None:
+    action, reason = _resolve_action(False, {"score": 10}, "auto_approve", [SENDER_DOMAIN_MISMATCH])
+    assert action == "human_review"
+    assert SENDER_DOMAIN_MISMATCH in reason
+
+
+def test_route_screening_failure_forces_review() -> None:
+    action, _ = _resolve_action(False, {"score": 5}, None, [SANCTIONS_SCREENING_FAILED])
+    assert action == "human_review"
+
+
+def test_route_informational_flag_does_not_force_review() -> None:
+    action, _ = _resolve_action(False, {"score": 10}, "auto_approve", [SANCTIONS_NOT_SCREENED])
+    assert action == "auto_approve"
+
+
+def test_route_policy_flag_never_downgrades_a_block() -> None:
+    assert _resolve_action(True, None, None, [SENDER_DOMAIN_MISMATCH])[0] == "block"
+    assert _resolve_action(False, {"score": 95}, None, [SENDER_DOMAIN_MISMATCH])[0] == "block"
+
+
+def test_route_without_flags_is_unchanged() -> None:
+    assert _resolve_action(False, {"score": 10}, "auto_approve")[0] == "auto_approve"
+    assert _resolve_action(False, {"score": 60}, None, [])[0] == "human_review"
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +653,34 @@ async def test_gate_ofac_passes_on_api_error() -> None:
     assert gate["passed"] is True
     assert "unavailable" in gate["reason"].lower()
     assert gate["details"]["api_error"] == "API timeout"
+    # Decision #8: a failed screen is not a hit, but must not be approved unseen.
+    assert result["policy_flags"] == [SANCTIONS_SCREENING_FAILED]
+
+
+@pytest.mark.asyncio
+async def test_gate_ofac_disabled_skips_api_and_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ofac_enabled=False the API is never called and the response says so."""
+    monkeypatch.setattr(gate_ofac_module.settings, "ofac_enabled", False, raising=False)
+    state = _base_state(parsed_invoice=_valid_parsed_invoice())
+
+    with patch("agent.nodes.gate_ofac.OFACClient") as MockOFAC:
+        result = await gate_ofac(state)
+
+    MockOFAC.assert_not_called()
+    assert result["gate_failed"] is False
+    gate = result["gate_results"][0]
+    assert gate["passed"] is True and gate["details"]["tier"] == "disabled"
+    assert "NOT screened" in gate["reason"]
+    assert result["policy_flags"] == [SANCTIONS_NOT_SCREENED]
+
+
+@pytest.mark.asyncio
+async def test_gate_ofac_clear_vendor_adds_no_policy_flag() -> None:
+    state = _base_state(parsed_invoice=_valid_parsed_invoice())
+    with patch("agent.nodes.gate_ofac.OFACClient") as MockOFAC:
+        MockOFAC.return_value.check_vendor.return_value = {"match": False, "score": 0.0, "matches": []}
+        result = await gate_ofac(state)
+    assert not result.get("policy_flags")
 
 
 # ---------------------------------------------------------------------------

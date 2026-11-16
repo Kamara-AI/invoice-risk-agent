@@ -55,6 +55,10 @@ def build_process_invoice_response(state: dict, replayed: bool = False) -> Proce
     else:
         raise ValueError("graph finished with neither a risk score nor a gate failure")
 
+    # Deterministic policy flags (agent/policy_flags.py) ride along with the
+    # LLM/gate flags so the bot and the reviewer see why a route was forced.
+    risk_flags += [flag for flag in (state.get("policy_flags") or []) if flag not in risk_flags]
+
     parsed = state.get("parsed_invoice") or {}
     return ProcessInvoiceResponse(
         invoice_id=str(state["invoice_id"]),

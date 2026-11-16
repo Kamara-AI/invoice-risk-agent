@@ -82,6 +82,10 @@ def _initial_state(invoice_id: str, pdf_bytes: bytes, metadata: InvoiceMetadataV
         "idempotency_key": metadata.idempotency_key,
         "source_message_id": metadata.source_message_id,
         "email_body": metadata.email_body or None,
+        # Validated by the contract but previously dropped here, so the documented
+        # sender-vs-vendor check could never run (found 2026-11-16).
+        "sender_email": str(metadata.sender_email),
+        "policy_flags": [],
         # Review is in UiPath Action Center and alerts go by email — no Slack.
         "notify_slack": False,
         "error_code": None,

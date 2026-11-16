@@ -51,6 +51,16 @@ class AgentState(TypedDict):
     """Cleaned email body used as LLM context (D12). UNTRUSTED input: never
     logged, never persisted, only passed to the LLM inside delimiters."""
 
+    sender_email: str | None
+    """Envelope sender of the source email. gate_quality compares it with the
+    invoice's vendor_email (agent/sender_check.py). None on Streamlit/evals
+    runs, where the check is skipped."""
+
+    policy_flags: list[str]
+    """Deterministic findings that are not gate failures (agent/policy_flags.py).
+    Some force human_review in route_invoice; all are appended to the contract
+    response's risk_flags. May be absent on older call paths — read with .get()."""
+
     notify_slack: bool | None
     """False on the UiPath path: route_invoice makes no Slack calls (review is
     in Action Center, alerts by email). Absent/None/True = Slack on (Streamlit)."""
