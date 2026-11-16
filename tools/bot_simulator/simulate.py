@@ -29,6 +29,12 @@ import httpx
 from pydantic import ValidationError
 
 from schemas.contract import ProcessInvoiceResponse, ReviewDecisionResponse
+from tools.bot_simulator.invoice_factory import (
+    InvoiceSpec,
+    fresh_clean_invoice,
+    fresh_review_invoice,
+    render_invoice_pdf,
+)
 from tools.bot_simulator.pdf_factory import NEWSLETTER_LINES, make_text_pdf
 from tools.bot_simulator.reference import build_idempotency_key, classify_status, clean_email_body
 from utils import EAT
@@ -101,6 +107,10 @@ class RunContext:
 
     def fixture(self, name: str) -> bytes:
         return (self.fixtures / name).read_bytes()
+
+    def invoice_metadata(self, label: str, spec: InvoiceSpec) -> dict:
+        """Metadata for a generated invoice: the sender is the vendor itself, as in real mail."""
+        return self.metadata(label, f"{spec.invoice_number}.pdf", sender_email=spec.vendor_email)
 
 
 # ---------------------------------------------------------------------------
@@ -189,26 +199,63 @@ def rejects_missing_pdf_part(ctx: RunContext) -> list[ScenarioResult]:
 # ---------------------------------------------------------------------------
 
 
+def _expect_routing(name: str, body: dict | None, expected: str) -> ScenarioResult:
+    """Check where Kagua routed a scored invoice. Score + flags go in `detail` for diagnosis."""
+    if body is None:
+        return ScenarioResult(name, False, expected, "not scored")
+    detail = "" if body["routing_decision"] == expected else (
+        f"score={body['risk_score']} flags={body.get('risk_flags')}"
+    )
+    return ScenarioResult(
+        scenario=name, passed=body["routing_decision"] == expected, expected=expected,
+        actual=f"{body['routing_decision']} score={body['risk_score']}", detail=detail,
+    )
+
+
 def score_replay_conflict(ctx: RunContext) -> list[ScenarioResult]:
-    """The core idempotency story: fresh → retry replays → same key + other PDF conflicts."""
-    meta = ctx.metadata("main", "clean_001.pdf")
-    pdf = ctx.fixture("clean_001.pdf")
+    """The core idempotency story: fresh → retry replays → same key + other PDF conflicts.
+
+    Uses a freshly generated invoice (invoice_factory): a static fixture would
+    hit gate_duplicate from earlier runs and never reach the scoring path.
+    """
+    spec = fresh_clean_invoice(ctx.run_id, datetime.now(EAT).date())
+    meta = ctx.invoice_metadata("main", spec)
+    pdf = render_invoice_pdf(spec)
 
     fresh, first = _expect_scored("fresh_score", ctx.post_invoice(meta, pdf), replayed=False)
     results = [fresh]
     if first is None:
         return results
     ctx.scored["main"] = first | {"idempotency_key": meta["idempotency_key"]}
+    results.append(_expect_routing("clean_invoice_auto_approves", first, "auto_approve"))
 
     replay, second = _expect_scored("retry_replays_same_result", ctx.post_invoice(meta, pdf), replayed=True)
     if second is not None and {**second, "replayed": False} != first:
         replay.passed, replay.detail = False, "replayed body differs from the first response"
     results.append(replay)
 
+    # Same key, different PDF bytes → Kagua must refuse before scoring anything.
+    other_pdf = render_invoice_pdf(fresh_clean_invoice(f"{ctx.run_id}-other", datetime.now(EAT).date()))
     results.append(_expect_error(
-        "same_key_different_pdf_conflicts", ctx.post_invoice(meta, ctx.fixture("clean_002.pdf")),
+        "same_key_different_pdf_conflicts", ctx.post_invoice(meta, other_pdf),
         409, "idempotency_conflict",
     ))
+    return results
+
+
+def score_review_invoice(ctx: RunContext) -> list[ScenarioResult]:
+    """A new-vendor invoice with stacked soft signals should route to human_review.
+
+    LLM scoring varies run to run; if it lands elsewhere the result says where
+    and why (score + flags), and the review-decision checks are skipped.
+    """
+    spec = fresh_review_invoice(ctx.run_id, datetime.now(EAT).date())
+    meta = ctx.invoice_metadata("review", spec)
+    scored, body = _expect_scored("review_invoice_scored", ctx.post_invoice(meta, render_invoice_pdf(spec)),
+                                  replayed=False)
+    results = [scored, _expect_routing("review_invoice_routes_to_review", body, "human_review")]
+    if body is not None:
+        ctx.scored["review"] = body | {"idempotency_key": meta["idempotency_key"]}
     return results
 
 
@@ -224,16 +271,24 @@ def review_decision_flow(ctx: RunContext) -> list[ScenarioResult]:
         ctx.post_review(UNKNOWN_INVOICE_ID, build_idempotency_key(ctx.message_id("ghost"), 1), "approve"),
         404, "invoice_not_found",
     )]
-    scored = ctx.scored.get("main")
-    if scored is None:
-        return results + [ScenarioResult("review_flow", False, "a scored invoice", "none", detail="fresh_score failed")]
+    # A decision on an invoice that was NOT routed to review must be refused.
+    main = ctx.scored.get("main")
+    if main is not None and main["routing_decision"] != "human_review":
+        results.append(_expect_error(
+            "review_non_review_invoice_409",
+            ctx.post_review(main["invoice_id"], main["idempotency_key"], "approve"),
+            409, "decision_conflict",
+        ))
 
-    invoice_id, key = scored["invoice_id"], scored["idempotency_key"]
-    if scored["routing_decision"] != "human_review":
-        results.append(_expect_error("review_non_review_invoice_409", ctx.post_review(invoice_id, key, "approve"),
-                                     409, "decision_conflict"))
-        return results
+    review = ctx.scored.get("review")
+    if review is None or review["routing_decision"] != "human_review":
+        actual = "not scored" if review is None else review["routing_decision"]
+        return results + [ScenarioResult(
+            "review_flow", False, "a human_review invoice", actual,
+            detail="review invoice did not route to human_review; approve/replay/conflict checks not run",
+        )]
 
+    invoice_id, key = review["invoice_id"], review["idempotency_key"]
     first = ctx.post_review(invoice_id, key, "approve")
     again = ctx.post_review(invoice_id, key, "approve")
     for name, response, replayed in (("review_approve", first, False), ("review_approve_again_replays", again, True)):
@@ -252,7 +307,7 @@ OFFLINE_SCENARIOS: list[Callable[[RunContext], list[ScenarioResult]]] = [
     health_ok, rejects_non_pdf, rejects_malformed_key, rejects_v0_metadata, rejects_missing_pdf_part,
 ]
 LIVE_SCENARIOS: list[Callable[[RunContext], list[ScenarioResult]]] = [
-    score_replay_conflict, rejects_not_an_invoice, review_decision_flow,
+    score_replay_conflict, score_review_invoice, rejects_not_an_invoice, review_decision_flow,
 ]
 
 

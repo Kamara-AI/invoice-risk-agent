@@ -163,10 +163,17 @@ def sim_client(monkeypatch: pytest.MonkeyPatch):
     ledger, graph = FakeLedger(), FakeGraph()
 
     def outcome(state: dict) -> dict:
-        # Behave like the real parser for the newsletter, score everything else for review.
+        # Behave like the real graph on the simulator's documents: the newsletter is
+        # not an invoice, the generated new-vendor (Kestrel) invoice goes to review,
+        # and the generated trusted-vendor invoice auto-approves.
         if b"NEWSLETTER" in state["raw_pdf_bytes"]:
             return {**state, "error": "parse_invoice: not an invoice: newsletter", "error_code": "not_an_invoice"}
-        return _scored_result(state)
+        if b"Kestrel" in state["raw_pdf_bytes"]:
+            return _scored_result(state)
+        return _scored_result(
+            state, routing_decision="auto_approve",
+            risk_score={"score": 12, "flags": [], "reasoning": "Trusted vendor, PO present."},
+        )
 
     graph.outcome = outcome
     monkeypatch.setattr(invoice_route, "request_store", ledger)

@@ -88,20 +88,27 @@ def test_duplicate_reference_is_skipped_not_error() -> None:
     assert summary["errors"] == []
 
 
-def test_dry_run_touches_nothing() -> None:
-    summary = md.dispatch(md.demo_jobs("run1"), cli=None, dry_run=True)
+def test_dry_run_touches_nothing(tmp_path: Path) -> None:
+    summary = md.dispatch(md.demo_jobs("run1", tmp_path), cli=None, dry_run=True)
 
     assert summary["dry_run"] is True
     assert [q["expected_routing"] for q in summary["queued"]] == ["auto_approve", "human_review", "block"]
     assert all(set(q["specific_content_keys"]) == SPEC_KEYS for q in summary["queued"])
 
 
-def test_demo_runs_get_fresh_keys() -> None:
-    first = {j.message_id for j in md.demo_jobs("run1")}
-    second = {j.message_id for j in md.demo_jobs("run2")}
+def test_demo_runs_get_fresh_keys(tmp_path: Path) -> None:
+    first = {j.message_id for j in md.demo_jobs("run1", tmp_path / "1")}
+    second = {j.message_id for j in md.demo_jobs("run2", tmp_path / "2")}
     assert first.isdisjoint(second), "each demo run must queue new items, not collide with the last run"
 
 
-def test_demo_fixtures_exist_and_are_pdfs() -> None:
-    for job in md.demo_jobs("x"):
+def test_demo_runs_get_fresh_invoices(tmp_path: Path) -> None:
+    """Approve/review PDFs must differ per run, or gate_duplicate blocks the second demo."""
+    first = [j.pdf_path.read_bytes() for j in md.demo_jobs("run1", tmp_path / "1")[:2]]
+    second = [j.pdf_path.read_bytes() for j in md.demo_jobs("run2", tmp_path / "2")[:2]]
+    assert all(a != b for a, b in zip(first, second))
+
+
+def test_demo_fixtures_exist_and_are_pdfs(tmp_path: Path) -> None:
+    for job in md.demo_jobs("x", tmp_path):
         assert job.pdf_path.read_bytes().startswith(b"%PDF"), job.pdf_path

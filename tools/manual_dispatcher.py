@@ -38,6 +38,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
+from tools.bot_simulator.invoice_factory import fresh_clean_invoice, fresh_review_invoice, render_invoice_pdf
 from tools.bot_simulator.reference import build_idempotency_key, clean_email_body, mask_email
 from utils import EAT
 
@@ -71,12 +72,21 @@ class DispatchPlan:
 
 
 # Demo set: one invoice per route, chosen so the outcome does not depend on
-# what is already in the database (the block is a deterministic math-gate fail).
-DEMO_SET: list[tuple[str, str, str, str]] = [
-    ("clean_001.pdf", "auto_approve", "Invoice for October services", "Hi, please find our October invoice attached. Regards, Accounts"),
-    ("edge_001.pdf", "human_review", "Overdue invoice - first time supplier", "Hello, this is our first invoice to you. Kindly process at your earliest. Thanks"),
-    ("fraud_math_001.pdf", "block", "Invoice attached", "Please pay the attached invoice today."),
-]
+# what is already in the database.
+#   approve + review → generated fresh each run (invoice_factory). The old
+#     static clean_001/edge_001 fixtures were scored in September, so
+#     gate_duplicate blocked them (found 2026-11-16).
+#   block → the static fraud_math_001 fixture: gate_math (gate 2) fails it
+#     before gate_duplicate (gate 3) runs, so a repeat cannot change the outcome.
+DEMO_EMAILS: dict[str, tuple[str, str]] = {  # route → (subject, raw email body)
+    "auto_approve": ("Invoice for November services",
+                     "Hi, please find our November invoice attached. Regards, Accounts"),
+    "human_review": ("Overdue invoice - first time supplier",
+                     "Hello, this is our first invoice to you. Kindly process at your earliest. Thanks"),
+    "block": ("Invoice attached", "Please pay the attached invoice today."),
+}
+DEMO_BLOCK_FIXTURE = "fraud_math_001.pdf"
+DEMO_BLOCK_SENDER = "billing@techproservices.com"  # the vendor email printed on that fixture
 
 
 def build_plan(job: InvoiceJob, received_at: datetime) -> DispatchPlan:
@@ -200,19 +210,38 @@ def dispatch(jobs: list[InvoiceJob], cli: UipCli | None, dry_run: bool) -> dict:
     return summary
 
 
-def demo_jobs(run_id: str) -> list[InvoiceJob]:
-    """The 3-route demo set with fresh Message-IDs, so every demo run queues new items."""
-    return [
-        InvoiceJob(
-            pdf_path=FIXTURES / filename,
-            sender_email="billing@demo-vendor.co.ke",
-            subject=subject,
-            email_body=body,
-            message_id=f"<demo-{run_id}-{filename.removesuffix('.pdf')}@kagua.local>",
-            expected_routing=expected,
-        )
-        for filename, expected, subject, body in DEMO_SET
-    ]
+def demo_jobs(run_id: str, out_dir: Path | None = None) -> list[InvoiceJob]:
+    """The 3-route demo set with fresh Message-IDs and fresh invoices, so every run queues new items.
+
+    Args:
+        run_id: Unique per run; drives Message-IDs and the generated invoice numbers/amounts.
+        out_dir: Where the generated PDFs are written before upload. Defaults to
+            %TEMP%/kagua-demo/<run_id> (synthetic data only, safe to delete).
+
+    Returns:
+        Jobs in route order: auto_approve, human_review, block.
+    """
+    out_dir = out_dir or Path(tempfile.gettempdir()) / "kagua-demo" / run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(EAT).date()
+
+    jobs: list[InvoiceJob] = []
+    for route, spec in (("auto_approve", fresh_clean_invoice(run_id, today)),
+                        ("human_review", fresh_review_invoice(run_id, today))):
+        pdf_path = out_dir / f"{spec.invoice_number}.pdf"
+        pdf_path.write_bytes(render_invoice_pdf(spec))
+        subject, body = DEMO_EMAILS[route]
+        jobs.append(InvoiceJob(
+            pdf_path=pdf_path, sender_email=spec.vendor_email, subject=subject, email_body=body,
+            message_id=f"<demo-{run_id}-{route}@kagua.local>", expected_routing=route,
+        ))
+
+    subject, body = DEMO_EMAILS["block"]
+    jobs.append(InvoiceJob(
+        pdf_path=FIXTURES / DEMO_BLOCK_FIXTURE, sender_email=DEMO_BLOCK_SENDER, subject=subject,
+        email_body=body, message_id=f"<demo-{run_id}-block@kagua.local>", expected_routing="block",
+    ))
+    return jobs
 
 
 def main(argv: list[str] | None = None) -> int:
