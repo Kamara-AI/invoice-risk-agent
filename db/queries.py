@@ -35,6 +35,51 @@ def get_vendor_by_name(vendor_name: str) -> dict | None:
     return data[0] if data else None
 
 
+def get_vendor_for_invoice(invoice_id: str) -> dict | None:
+    """Fetch the vendor_ledger row linked to an invoice_history row.
+
+    Used by the review-decision route: a human approve on a flagged vendor's
+    invoice restores trust (agent/vendor_trust.py), so it needs the vendor
+    behind the invoice being decided.
+
+    Args:
+        invoice_id: UUID of the invoice_history row.
+
+    Returns:
+        The vendor record dict, or None if the invoice or its vendor link is missing.
+
+    Raises:
+        Exception: On Supabase client errors.
+    """
+    invoice = (
+        supabase.table("invoice_history").select("vendor_id").eq("invoice_id", invoice_id).execute().data
+    )
+    vendor_id = invoice[0].get("vendor_id") if invoice else None
+    if not vendor_id:
+        return None
+    vendor = supabase.table("vendor_ledger").select("*").eq("vendor_id", vendor_id).execute().data
+    return vendor[0] if vendor else None
+
+
+def set_vendor_trust(vendor_id: str, trust_level: str) -> dict:
+    """Set vendor_ledger.trust_level for one vendor.
+
+    Args:
+        vendor_id: UUID of the vendor_ledger row.
+        trust_level: 'new', 'trusted' or 'flagged'.
+
+    Returns:
+        The updated vendor record dict.
+
+    Raises:
+        Exception: On Supabase client errors.
+    """
+    response = (
+        supabase.table("vendor_ledger").update({"trust_level": trust_level}).eq("vendor_id", vendor_id).execute()
+    )
+    return response.data[0]
+
+
 def upsert_vendor(vendor_data: dict) -> dict:
     """Insert or update a vendor record in vendor_ledger.
 

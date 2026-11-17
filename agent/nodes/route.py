@@ -27,6 +27,7 @@ import logging
 from typing import Literal
 
 from agent.policy_flags import requires_review
+from agent.vendor_trust import failed_gates, trust_after_routing
 from config import settings
 from db.queries import create_invoice_record, update_invoice_status, upsert_vendor, write_audit_log
 from db.queries import get_vendor_by_name
@@ -152,10 +153,16 @@ async def route_invoice(state: AgentState) -> AgentState:
         # the Stripe BEC check. Only approved/reviewed invoices carry a trusted fingerprint.
         if vendor_bank_account and action != "block":
             vendor_upsert_data["stripe_fingerprint"] = vendor_bank_account
-        if action == "block":
-            vendor_upsert_data["trust_level"] = "flagged"
-        elif action == "auto_approve" and existing_vendor:
-            vendor_upsert_data["trust_level"] = "trusted"
+        # Trust changes follow agent/vendor_trust.py: flag only on vendor-implicating
+        # blocks (stripe/ofac), never on impostor/math/duplicate blocks; never auto-clear a flag.
+        current_trust = existing_vendor.get("trust_level") if existing_vendor else None
+        new_trust = trust_after_routing(action, gate_results, current_trust)
+        if new_trust is not None:
+            vendor_upsert_data["trust_level"] = new_trust
+            logger.info(
+                "route_invoice: vendor trust %s -> %s (action=%s, failed_gates=%s)",
+                current_trust, new_trust, action, failed_gates(gate_results),
+            )
 
         upserted = upsert_vendor(vendor_upsert_data)
         vendor_id = upserted.get("vendor_id")

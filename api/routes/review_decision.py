@@ -14,9 +14,11 @@ Rules:
     - Idempotent: the same decision again → 200 replayed=true (the Handler
       retries 3 times on failure); a DIFFERENT decision → 409.
 
-Write order: invoice_history status → audit_log → ledger review columns.
-The ledger write is last, so a crash part-way leaves the decision unrecorded
-and the retry redoes the (idempotent) status update.
+Write order: invoice_history status → audit_log → vendor trust restore
+(approve on a flagged vendor only, agent/vendor_trust.py, own audit event)
+→ ledger review columns. The ledger write is last, so a crash part-way
+leaves the decision unrecorded and the retry redoes the (idempotent)
+status update and trust restore.
 """
 
 from __future__ import annotations
@@ -28,7 +30,8 @@ from starlette.concurrency import run_in_threadpool
 
 from api.errors import ContractError
 from db import processing_requests as request_store
-from db.queries import update_invoice_status, write_audit_log
+from agent.vendor_trust import trust_after_human_decision
+from db.queries import get_vendor_for_invoice, set_vendor_trust, update_invoice_status, write_audit_log
 from schemas.audit import AuditRecord
 from schemas.contract import ReviewDecisionRequest, ReviewDecisionResponse
 from utils import EAT, now_eat
@@ -92,7 +95,42 @@ async def review_decision(invoice_id: str, body: ReviewDecisionRequest) -> Revie
             created_at=now_eat(),
         ),
     )
+    await _apply_vendor_trust(invoice_id, body.decision, body.reviewer, key)
     await run_in_threadpool(request_store.record_review_decision, key, body.decision, body.reviewer, decided_at)
 
     logger.info("review_decision key=%s invoice_id=%s decision=%s", key, invoice_id, body.decision)
     return ReviewDecisionResponse(invoice_id=invoice_id, decision=body.decision, status=new_status, replayed=False)
+
+
+async def _apply_vendor_trust(invoice_id: str, decision: str, reviewer: str, key: str) -> None:
+    """Restore a flagged vendor's trust when a human approves its invoice.
+
+    Why: only a human can clear a vendor flag (agent/vendor_trust.py). The
+    change gets its own audit event so the trail shows who restored trust and
+    on which invoice. Errors propagate: the Review Handler retries, and every
+    step before the ledger write is idempotent.
+    """
+    vendor = await run_in_threadpool(get_vendor_for_invoice, invoice_id)
+    if vendor is None:
+        return
+    new_trust = trust_after_human_decision(decision, vendor.get("trust_level"))
+    if new_trust is None:
+        return
+    await run_in_threadpool(set_vendor_trust, vendor["vendor_id"], new_trust)
+    await run_in_threadpool(
+        write_audit_log,
+        AuditRecord(
+            invoice_id=invoice_id,
+            event_type="vendor.trust_restored",
+            actor=reviewer,
+            details={
+                "vendor_id": vendor["vendor_id"],
+                "from": vendor.get("trust_level"),
+                "to": new_trust,
+                "idempotency_key": key,
+            },
+            created_at=now_eat(),
+        ),
+    )
+    logger.info("review_decision key=%s vendor_id=%s trust %s -> %s",
+                key, vendor["vendor_id"], vendor.get("trust_level"), new_trust)

@@ -32,7 +32,7 @@ _STUBS: dict[str, tuple[str, ...]] = {
     "db": (),
     "db.client": ("supabase",),
     "db.queries": ("get_vendor_by_name", "upsert_vendor", "create_invoice_record",
-                   "update_invoice_status", "write_audit_log"),
+                   "update_invoice_status", "write_audit_log", "get_vendor_for_invoice", "set_vendor_trust"),
     # The real ledger is replaced per test by FakeLedger; this stub only lets imports resolve.
     "db.processing_requests": (),
     "integrations": (),
@@ -142,13 +142,18 @@ def env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(review_route, "request_store", ledger)
     monkeypatch.setattr(review_route, "update_invoice_status", update_status)
     monkeypatch.setattr(review_route, "write_audit_log", audit)
+    # Vendor lookups for the trust-restore step; default = vendor not linked (no trust change).
+    vendor_for_invoice, set_trust = MagicMock(return_value=None), MagicMock()
+    monkeypatch.setattr(review_route, "get_vendor_for_invoice", vendor_for_invoice)
+    monkeypatch.setattr(review_route, "set_vendor_trust", set_trust)
 
     app = FastAPI()
     app.include_router(invoice_route.router, prefix="/invoices")
     app.include_router(review_route.router, prefix="/invoices")
     register_error_handlers(app)
 
-    return MagicMock(client=TestClient(app), ledger=ledger, graph=graph, update_status=update_status, audit=audit)
+    return MagicMock(client=TestClient(app), ledger=ledger, graph=graph, update_status=update_status, audit=audit,
+                     vendor_for_invoice=vendor_for_invoice, set_trust=set_trust)
 
 
 def _metadata(**overrides) -> str:
@@ -520,3 +525,65 @@ async def test_route_still_uses_slack_for_streamlit(route_mocks: MagicMock) -> N
 
     route_mocks.SlackClient.return_value.send_review_request.assert_called_once()
     assert result["slack_message_ts"] == "1700000000.0001"
+
+
+# ---------------------------------------------------------------------------
+# Vendor trust (agent/vendor_trust.py) wired into review-decision and route
+# ---------------------------------------------------------------------------
+
+FLAGGED_VENDOR = {"vendor_id": "v-flagged", "trust_level": "flagged"}
+
+
+def test_review_approve_restores_flagged_vendor(env) -> None:
+    env.vendor_for_invoice.return_value = dict(FLAGGED_VENDOR)
+    invoice_id = _post(env.client).json()["invoice_id"]
+
+    assert _review(env.client, invoice_id, "approve").status_code == 200
+
+    env.set_trust.assert_called_once_with("v-flagged", "trusted")
+    events = [call.args[0].event_type for call in env.audit.call_args_list]
+    assert events == ["human.approve", "vendor.trust_restored"]
+    assert env.audit.call_args.args[0].actor == "brian"
+
+
+def test_review_reject_keeps_vendor_flagged(env) -> None:
+    env.vendor_for_invoice.return_value = dict(FLAGGED_VENDOR)
+    invoice_id = _post(env.client).json()["invoice_id"]
+
+    assert _review(env.client, invoice_id, "reject").status_code == 200
+
+    env.set_trust.assert_not_called()
+
+
+def _blocked_state(failed_gate: str) -> dict:
+    state = _routable_state(95, notify_slack=False)
+    state["gate_failed"] = True
+    state["gate_results"] = [{"gate_name": failed_gate, "passed": False}]
+    return state
+
+
+async def test_route_impostor_block_leaves_real_vendor_trusted(route_mocks: MagicMock) -> None:
+    """Regression: a lookalike-sender (quality gate) block must not flag the named vendor."""
+    route_mocks.get_vendor_by_name.return_value = {"vendor_id": "v-1", "trust_level": "trusted"}
+
+    result = await route_node.route_invoice(_blocked_state("quality"))
+
+    assert result["routing_decision"] == "block"
+    assert "trust_level" not in route_mocks.upsert_vendor.call_args.args[0]
+
+
+async def test_route_bank_change_block_flags_vendor(route_mocks: MagicMock) -> None:
+    route_mocks.get_vendor_by_name.return_value = {"vendor_id": "v-1", "trust_level": "trusted"}
+
+    await route_node.route_invoice(_blocked_state("stripe"))
+
+    assert route_mocks.upsert_vendor.call_args.args[0]["trust_level"] == "flagged"
+
+
+async def test_route_auto_approve_never_clears_flag(route_mocks: MagicMock) -> None:
+    route_mocks.get_vendor_by_name.return_value = {"vendor_id": "v-1", "trust_level": "flagged"}
+
+    result = await route_node.route_invoice(_routable_state(10, notify_slack=False))
+
+    assert result["routing_decision"] == "auto_approve"
+    assert "trust_level" not in route_mocks.upsert_vendor.call_args.args[0]
