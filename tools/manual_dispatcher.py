@@ -125,19 +125,40 @@ class UipCli:
         exe = shutil.which("uip")
         if exe is None:
             raise UipError("`uip` CLI not found on PATH")
-        self._exe = exe
+        self._cmd = self._resolve_command(Path(exe))
         # Robot-auth enforcement would ignore the saved user login; drop it for this process.
         self._env = {k: v for k, v in os.environ.items() if k != "UIPATH_CLI_ENFORCE_ROBOT_AUTH"}
 
+    @staticmethod
+    def _resolve_command(exe: Path) -> list[str]:
+        """Bypass the npm `.cmd` shim on Windows.
+
+        Why: the shim runs through cmd.exe, which re-parses our arguments. Queue payloads
+        contain Message-IDs like `<abc@vendor.co.ke>`, and cmd.exe treats `<`/`>` as file
+        redirection — the call fails with empty stdout. Calling node on the CLI's entry
+        script passes each argument verbatim (CreateProcess, no shell).
+        """
+        if exe.suffix.lower() != ".cmd":
+            return [str(exe)]
+        entry = exe.parent / "node_modules" / "@uipath" / "cli" / "dist" / "index.js"
+        node = shutil.which("node")
+        if node is None or not entry.is_file():
+            raise UipError(f"cannot bypass {exe.name}: node or {entry} not found")
+        return [node, str(entry)]
+
     def _run(self, *args: str) -> dict:
         completed = subprocess.run(
-            [self._exe, *args, "--output", "json"],
+            [*self._cmd, *args, "--output", "json"],
             capture_output=True, text=True, env=self._env, timeout=180,
         )
         try:
             result = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
-            raise UipError(f"uip {args[0]} {args[1]}: non-JSON output: {completed.stdout[:300]}") from exc
+            # Surface stderr too: the CLI writes argument errors there and leaves stdout empty.
+            raise UipError(
+                f"uip {args[0]} {args[1]}: non-JSON output (exit {completed.returncode}): "
+                f"stdout={completed.stdout[:300]!r} stderr={completed.stderr[-600:]!r}"
+            ) from exc
         if result.get("Result") != "Success":
             raise UipError(f"uip {' '.join(args[:2])}: {result.get('Message')} — {result.get('Instructions', '')}")
         return result
@@ -152,7 +173,8 @@ class UipCli:
         buckets = self._run("or", "buckets", "list", "--folder-path", folder, "--name", name)["Data"]
         for bucket in buckets:
             if bucket["Name"] == name:
-                return bucket["Identifier"]
+                # uip CLI >= 1.205 returns the bucket GUID as "Key"; older builds used "Identifier".
+                return bucket.get("Key") or bucket["Identifier"]
         raise UipError(f"bucket {name!r} not found in folder {folder!r}")
 
     def upload(self, bucket_key: str, folder: str, bucket_path: str, local_file: Path, content_type: str) -> None:
